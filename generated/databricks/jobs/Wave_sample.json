@@ -1,0 +1,26 @@
+{
+  "name": "bw-wave_sample",
+  "format": "MULTI_TASK",
+  "waveId": "1a5b3738-270e-4a87-b660-a2c2ce24c2a7",
+  "job_clusters": [
+    {
+      "job_cluster_key": "bw",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 1
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "0kwdldtx68kxwwp5un8f1x1a7fvmhrjc",
+      "spark_python_task": {
+        "python_file": "{{workspace}}/transformations/1a5b3738-270e-4a87-b660-a2c2ce24c2a7/0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC.py"
+      },
+      "job_cluster_key": "bw",
+      "shared": false,
+      "ref": "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"
+    }
+  ]
+}

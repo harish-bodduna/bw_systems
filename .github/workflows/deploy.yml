@@ -1,0 +1,160 @@
+# sap-bw-migrator-workflow: 4
+# Committed into the GENERATED repository as .github/workflows/deploy.yml
+#
+# CD after green CI on a sha. Dispatch-only: merging to `dev` is not a
+# deploy, and neither is a git push. The tool fires this workflow against
+# the sha CI already validated — never the tip of an environment branch.
+#
+# Two gates, and they are deliberately different questions:
+#
+#   the tool's reviewer asked  "is this PySpark correct?"
+#   the Environment reviewer asks  "ship it to this warehouse, now?"
+#
+# The first is recorded in waves/<wave>.json at commit time and enforced by
+# the `gate` job below. The second is a GitHub Environment with required
+# reviewers, which is what makes the workflow pause.
+#
+# SECRETS REQUIRED (Settings → Secrets and variables → Actions):
+#   DATABRICKS_HOST    https://adb-1234567890.12.azuredatabricks.net
+#   DATABRICKS_TOKEN   a workspace personal access token
+#
+# Deployment *names* — catalog, schema, table, mount — are NOT secrets and come
+# from the manifest. Only the host and token live here.
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      wave:
+        description: 'Manifest path, e.g. waves/fi_glaccount.json'
+        required: true
+      environment:
+        description: 'Target environment'
+        required: true
+        default: test
+        type: choice
+        options: [test, prod]
+      sha:
+        description: 'Exact commit CI already validated'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      wave: ${{ steps.resolve.outputs.wave }}
+      environment: ${{ steps.resolve.outputs.environment }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve wave, environment, and sha
+        id: resolve
+        run: |
+          SHA="${{ inputs.sha }}"
+          if [ -z "$SHA" ]; then
+            echo "::error title=Missing sha::Deploy a specific commit, not the branch tip"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "wave=${{ inputs.wave }}" >> "$GITHUB_OUTPUT"
+          echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+
+  gate:
+    needs: plan
+    if: needs.plan.outputs.wave != ''
+    runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.check.outputs.approved }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Re-run the checks against this exact commit
+        run: python ci/verify.py "${{ needs.plan.outputs.wave }}"
+
+      - name: Refuse anything the tool has not approved
+        id: check
+        run: |
+          python - "${{ needs.plan.outputs.wave }}" "${{ needs.plan.outputs.environment }}" <<'PY'
+          import json, sys
+          manifest, env = sys.argv[1], sys.argv[2]
+          m = json.load(open(manifest))
+
+          pending = [i["ref"] for i in m.get("items", [])
+                     if i.get("review") != "approved"]
+          if pending:
+              print(f"::error title=Not approved::{len(pending)} item(s) have no "
+                    f"approval in the tool: {', '.join(pending[:10])}")
+              # Deploying unreviewed generated code is the exact failure the
+              # review gate exists to prevent. Refused for every environment,
+              # not just production — test data is still someone's data.
+              sys.exit(1)
+
+          print(f"::notice::{m.get('name')} — {m.get('itemCount')} item(s), all approved")
+          with open(__import__("os").environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("approved=true\n")
+          PY
+
+  deploy:
+    needs: [plan, gate]
+    if: needs.plan.outputs.wave != ''
+    runs-on: ubuntu-latest
+    # THIS is what pauses the pipeline. Configure required reviewers on the
+    # environment in Settings → Environments; without them this runs straight
+    # through and there is no human gate at all.
+    environment:
+      name: ${{ needs.plan.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check the workspace is reachable before changing anything
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+            echo "::error title=Missing secrets::Set DATABRICKS_HOST and DATABRICKS_TOKEN"
+            exit 1
+          fi
+          # Fail here rather than half-way through uploading forty files.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            "$DATABRICKS_HOST/api/2.0/clusters/spark-versions")
+          if [ "$code" != "200" ]; then
+            echo "::error title=Databricks unreachable::HTTP $code from $DATABRICKS_HOST"
+            exit 1
+          fi
+
+      - name: Deploy
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          python ci/deploy_databricks.py \
+            --manifest "${{ needs.plan.outputs.wave }}" \
+            --environment "${{ needs.plan.outputs.environment }}" \
+            --commit "${{ needs.plan.outputs.sha }}"
+
+      - name: Record what was deployed
+        if: always()
+        run: |
+          echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Wave: \`${{ needs.plan.outputs.wave }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: \`${{ needs.plan.outputs.environment }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${{ needs.plan.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Released by: @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"

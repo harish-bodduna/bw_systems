@@ -1,0 +1,22 @@
+schemaVersion: 1
+wave:
+  id: "1a5b3738-270e-4a87-b660-a2c2ce24c2a7"
+  name: "Wave_sample"
+  platform: "postgres"
+  language: "PostgreSQL"
+objects:
+  - id: "/IMO/PUR_D10"
+    type: "IOBJ"
+    role: "migrated"
+    declared: true
+  - id: "ZTRAN_EKKO_HIST"
+    type: "RSDS"
+    role: "migrated"
+    declared: true
+transformations:
+  - ref: "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"
+    file: "transformations/0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"
+edges:
+  - from: "ZTRAN_EKKO_HIST"
+    to: "/IMO/PUR_D10"
+    via: "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"

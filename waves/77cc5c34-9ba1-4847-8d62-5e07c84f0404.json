@@ -1,0 +1,149 @@
+{
+  "manifestVersion": 1,
+  "waveId": "77cc5c34-9ba1-4847-8d62-5e07c84f0404",
+  "name": "Wave 3",
+  "platform": "postgres",
+  "language": "PostgreSQL",
+  "allApproved": false,
+  "approvedCount": 0,
+  "itemCount": 1,
+  "items": [
+    {
+      "ref": "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC",
+      "kind": "transformation",
+      "path": "transformations/77cc5c34-9ba1-4847-8d62-5e07c84f0404/0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC.py",
+      "platform": "databricks",
+      "language": "PySpark",
+      "review": "pending",
+      "deploy": {
+        "platform": "databricks",
+        "language": "PySpark"
+      },
+      "tables": [
+        "ZTRAN_EKKO_HIST",
+        "/IMO/PUR_D10"
+      ],
+      "fingerprint": "6cb3024c234fab5e8c5d6de4c89cfc82a6ee84b74f3707d1a3575c0b005469c0",
+      "shared": true,
+      "reusedFromWave": "1a5b3738-270e-4a87-b660-a2c2ce24c2a7",
+      "testable": true,
+      "skipReason": "",
+      "sourceSchema": [
+        {
+          "name": "BUKRS",
+          "type": "varchar(4)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "EBELN",
+          "type": "varchar(10)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "UNSEZ",
+          "type": "varchar(12)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "IHREZ",
+          "type": "varchar(12)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "ZZHDRTXT",
+          "type": "varchar(250)",
+          "nullable": true,
+          "isKey": false
+        }
+      ],
+      "targetSchema": [
+        {
+          "name": "0RECORDMODE",
+          "type": "varchar(1)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "0COMP_CODE",
+          "type": "varchar(4)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "0OI_EBELN",
+          "type": "varchar(10)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "ZCOURREF",
+          "type": "varchar(12)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "ZCYOURREF",
+          "type": "varchar(12)",
+          "nullable": true,
+          "isKey": false
+        },
+        {
+          "name": "ZHDRTEXT",
+          "type": "varchar(250)",
+          "nullable": true,
+          "isKey": false
+        }
+      ],
+      "fixture": {
+        "rows": [
+          {
+            "BUKRS": "BUKR",
+            "EBELN": "EBEL8925",
+            "UNSEZ": "UNSE3444",
+            "IHREZ": "IHRE695",
+            "ZZHDRTXT": "ZZHD1665"
+          },
+          {
+            "BUKRS": "BUKR",
+            "EBELN": "EBEL2623",
+            "UNSEZ": "UNSE9914",
+            "IHREZ": "IHRE8992",
+            "ZZHDRTXT": "ZZHD2166"
+          },
+          {
+            "BUKRS": null,
+            "EBELN": null,
+            "UNSEZ": null,
+            "IHREZ": null,
+            "ZZHDRTXT": null
+          },
+          {
+            "BUKRS": "",
+            "EBELN": "",
+            "UNSEZ": "",
+            "IHREZ": "",
+            "ZZHDRTXT": ""
+          },
+          {
+            "BUKRS": "BUKR",
+            "EBELN": "EBEL2815",
+            "UNSEZ": "UNSE6989",
+            "IHREZ": "IHRE6379",
+            "ZZHDRTXT": "ZZHD3261"
+          }
+        ],
+        "count": 5
+      },
+      "routineFields": {
+        "ZCOURREF": "UNSEZ",
+        "ZCYOURREF": "IHREZ",
+        "ZHDRTEXT": "ZZHDRTXT"
+      }
+    }
+  ],
+  "job": "generated/databricks/jobs/Wave_3.json"
+}

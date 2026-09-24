@@ -1,0 +1,20 @@
+schemaVersion: 1
+wave:
+  id: "77cc5c34-9ba1-4847-8d62-5e07c84f0404"
+  name: "Wave 3"
+  platform: "postgres"
+  language: "PostgreSQL"
+objects:
+  - id: "/IMO/PUR_D10"
+    type: "IOBJ"
+    role: "migrated"
+  - id: "ZTRAN_EKKO_HIST"
+    type: "RSDS"
+    role: "context"
+transformations:
+  - ref: "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"
+    file: "transformations/0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"
+edges:
+  - from: "ZTRAN_EKKO_HIST"
+    to: "/IMO/PUR_D10"
+    via: "0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC"

@@ -4,8 +4,8 @@
   "name": "Wave 3",
   "platform": "postgres",
   "language": "PostgreSQL",
-  "allApproved": false,
-  "approvedCount": 0,
+  "allApproved": true,
+  "approvedCount": 1,
   "itemCount": 1,
   "items": [
     {
@@ -14,7 +14,7 @@
       "path": "transformations/77cc5c34-9ba1-4847-8d62-5e07c84f0404/0KWDLDTX68KXWWP5UN8F1X1A7FVMHRJC.py",
       "platform": "databricks",
       "language": "PySpark",
-      "review": "pending",
+      "review": "approved",
       "deploy": {
         "platform": "databricks",
         "language": "PySpark"

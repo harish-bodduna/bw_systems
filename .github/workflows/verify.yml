@@ -1,4 +1,4 @@
-# sap-bw-migrator-workflow: 4
+# sap-bw-migrator-workflow: 5
 # Committed into the GENERATED repository as .github/workflows/verify.yml
 #
 # CI for a sha already merged onto `dev`. Sandbox checks during development
@@ -79,6 +79,43 @@ jobs:
             [ -z "$manifest" ] && continue
             echo "::group::$manifest"
             python ci/verify.py "$manifest" || STATUS=1
+            echo "::endgroup::"
+          done <<< "${{ steps.changed.outputs.files }}"
+          exit $STATUS
+
+      - name: Extra checks from current dev
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          sparse-checkout: |
+            ci/extra.yml
+            ci/run_extra.py
+          sparse-checkout-cone-mode: false
+          path: .ci-extra
+
+      - name: Extra checks
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -o pipefail
+          EXTRA_YML=".ci-extra/ci/extra.yml"
+          EXTRA_PY=".ci-extra/ci/run_extra.py"
+          if [ ! -f "$EXTRA_PY" ] && [ -f ci/run_extra.py ]; then
+            EXTRA_PY="ci/run_extra.py"
+          fi
+          if [ ! -f "$EXTRA_YML" ]; then
+            echo "No extra checks on this branch — pack only"
+            exit 0
+          fi
+          if [ ! -f "$EXTRA_PY" ]; then
+            echo "::warning::ci/run_extra.py missing; skip extra checks"
+            exit 0
+          fi
+          STATUS=0
+          while IFS= read -r manifest; do
+            [ -z "$manifest" ] && continue
+            echo "::group::extra $manifest"
+            python "$EXTRA_PY" "$EXTRA_YML" "$manifest" || STATUS=1
             echo "::endgroup::"
           done <<< "${{ steps.changed.outputs.files }}"
           exit $STATUS

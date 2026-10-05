@@ -1,4 +1,4 @@
-# sap-bw-migrator-workflow: 5
+# sap-bw-migrator-workflow: 7
 # Committed into the GENERATED repository as .github/workflows/verify.yml
 #
 # CI for a sha already merged onto `dev`. Sandbox checks during development
@@ -10,6 +10,7 @@
 # cannot reach the control plane.
 
 name: Verify generated code
+run-name: Integration ${{ inputs.sha }}
 
 on:
   workflow_dispatch:
@@ -83,39 +84,44 @@ jobs:
           done <<< "${{ steps.changed.outputs.files }}"
           exit $STATUS
 
-      - name: Extra checks from current dev
+      - name: Custom assertions from current dev
         continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
           sparse-checkout: |
+            ci/assertions.yml
+            ci/run_assertions.py
             ci/extra.yml
             ci/run_extra.py
           sparse-checkout-cone-mode: false
           path: .ci-extra
 
-      - name: Extra checks
+      - name: Custom assertions
         if: steps.changed.outputs.files != ''
         run: |
           set -o pipefail
-          EXTRA_YML=".ci-extra/ci/extra.yml"
-          EXTRA_PY=".ci-extra/ci/run_extra.py"
-          if [ ! -f "$EXTRA_PY" ] && [ -f ci/run_extra.py ]; then
-            EXTRA_PY="ci/run_extra.py"
-          fi
-          if [ ! -f "$EXTRA_YML" ]; then
-            echo "No extra checks on this branch — pack only"
+          YML=""
+          for f in .ci-extra/ci/assertions.yml .ci-extra/ci/extra.yml ci/assertions.yml ci/extra.yml; do
+            if [ -f "$f" ]; then YML="$f"; break; fi
+          done
+          PY=""
+          for f in .ci-extra/ci/run_assertions.py .ci-extra/ci/run_extra.py ci/run_assertions.py ci/run_extra.py; do
+            if [ -f "$f" ]; then PY="$f"; break; fi
+          done
+          if [ -z "$YML" ]; then
+            echo "No custom assertions on this branch — core validations only"
             exit 0
           fi
-          if [ ! -f "$EXTRA_PY" ]; then
-            echo "::warning::ci/run_extra.py missing; skip extra checks"
+          if [ -z "$PY" ]; then
+            echo "::warning::ci/run_assertions.py missing; skip custom assertions"
             exit 0
           fi
           STATUS=0
           while IFS= read -r manifest; do
             [ -z "$manifest" ] && continue
-            echo "::group::extra $manifest"
-            python "$EXTRA_PY" "$EXTRA_YML" "$manifest" || STATUS=1
+            echo "::group::assertions $manifest"
+            python "$PY" "$YML" "$manifest" || STATUS=1
             echo "::endgroup::"
           done <<< "${{ steps.changed.outputs.files }}"
           exit $STATUS

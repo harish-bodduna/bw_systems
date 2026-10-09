@@ -30,6 +30,7 @@ Exit codes are the interface:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -42,6 +43,37 @@ SUPPORTED_MANIFEST = 1
 OK = "\033[32m✓\033[0m" if sys.stdout.isatty() else "PASS"
 BAD = "\033[31m✗\033[0m" if sys.stdout.isatty() else "FAIL"
 SKIP = "-"
+
+#: Same list as app/testing/checks.py. Duplicated because this file cannot
+#: import the harness on a GitHub runner.
+AGGREGATING = (
+    "groupby", "group by", "distinct", "dropduplicates", "agg(",
+    "reducebykey", "rollup", "cube(", "pivot(",
+)
+_PLACEHOLDER_NEEDLES = (
+    "placeholder",
+    "todo",
+    "stub",
+    "assuming this function",
+    "assume this function",
+)
+_SECRET_NEEDLES = (
+    "aws_secret_access_key",
+    "begin rsa private key",
+    "begin openssh private key",
+    "password=",
+    "api_key=",
+    "secret_key=",
+    "databricks_token",
+    "ghp_",
+    "xoxb-",
+)
+_PROD_WRITE = (
+    "drop database",
+    "drop schema",
+    "truncate table",
+    "grant all",
+)
 
 
 class Result:
@@ -150,6 +182,26 @@ def check_routines_translated(code: str, routines: dict, result: Result, ref: st
     )
 
 
+def check_cardinality(code: str, result: Result, ref: str) -> None:
+    """A 1:1 recode must not aggregate. Same needles as the in-tool harness."""
+    lowered = code.lower()
+    found = [op for op in AGGREGATING if op in lowered]
+    result.check(
+        ref, "no silent aggregation", not found,
+        f"row count would change: {', '.join(found)}",
+    )
+
+
+def check_no_placeholder_logic(code: str, result: Result, ref: str) -> None:
+    """Reject guessed logic disguised as implementation."""
+    lowered = code.lower()
+    found = [n for n in _PLACEHOLDER_NEEDLES if re.search(rf"\b{re.escape(n)}\b", lowered)]
+    result.check(
+        ref, "no stub or TODO logic", not found,
+        f"contains {', '.join(found)}",
+    )
+
+
 def check_parses(code: str, language: str, result: Result, ref: str) -> None:
     """Syntax. Cheap, and catches a truncated generation immediately."""
     lang = (language or "").lower()
@@ -168,10 +220,179 @@ def check_parses(code: str, language: str, result: Result, ref: str) -> None:
                      "unbalanced parentheses" if not balanced else "no statement keyword")
 
 
+def _is_python(language: str) -> bool:
+    lang = (language or "").lower()
+    return "pyspark" in lang or "python" in lang or "snowpark" in lang
+
+
+def check_no_unimplemented_paths(code: str, language: str, result: Result, ref: str) -> None:
+    """Python that raises NotImplementedError has not passed anything.
+
+    Same rule as app/testing/checks.py: a fail-fast for a call with no source
+    is honest, and it is still code that raises on its first run. Before this
+    check every other check passed it and the wave went green.
+    """
+    if not _is_python(language):
+        return
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return  # check_parses already failed it
+    raised = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        exc = node.exc
+        target = exc.func if isinstance(exc, ast.Call) else exc
+        named = (
+            (isinstance(target, ast.Name) and target.id == "NotImplementedError")
+            or (isinstance(target, ast.Attribute) and target.attr == "NotImplementedError")
+        )
+        if named:
+            msg = ""
+            if isinstance(exc, ast.Call) and exc.args:
+                arg = exc.args[0]
+                if isinstance(arg, ast.Constant):
+                    msg = str(arg.value)
+                elif isinstance(arg, ast.JoinedStr):
+                    msg = "".join(v.value if isinstance(v, ast.Constant) else "{…}" for v in arg.values)
+            raised.append(msg.strip() or "(no message)")
+    result.check(
+        ref, "no unimplemented paths", not raised,
+        "raises NotImplementedError for: " + "; ".join(raised[:5]),
+    )
+
+
+_RUNTIME_FILE = "ci/bw_sap_runtime.py"
+_RUNTIME_IMPORT = re.compile(r"^\s*(?:import\s+bw_sap_runtime|from\s+bw_sap_runtime\s+import)", re.M)
+_RUNTIME_USE = re.compile(r"\bsap_rt\.([A-Za-z_]\w*)")
+
+
+def _runtime_exports(path: Path) -> set[str]:
+    """`__all__` of the committed runtime, read without importing it."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
+        ):
+            return {e.value for e in getattr(node.value, "elts", []) if isinstance(e, ast.Constant)}
+    return set()
+
+
+_RUNTIME_ALIAS_IMPORT = re.compile(r"^\s*import\s+bw_sap_runtime\s+as\s+sap_rt\s*(?:#.*)?$", re.M)
+
+
+def check_runtime(code: str, root: Path, result: Result, ref: str, language: str = "") -> None:
+    """An artifact that imports the SAP runtime needs it committed beside it,
+    with every function it calls. Otherwise the deploy succeeds and the job
+    fails with ModuleNotFoundError — or AttributeError — on the cluster.
+    Same rules as app/agents/externals.runtime_usage_errors."""
+    used = _RUNTIME_USE.findall(code)
+    imported = bool(_RUNTIME_IMPORT.search(code))
+    if not used and not imported:
+        return
+    if "pyspark" not in (language or "").lower():
+        result.check(ref, "SAP runtime committed", False,
+                     f"bw_sap_runtime is PySpark-only and cannot run under {language or 'this language'}")
+        return
+    if used and not _RUNTIME_ALIAS_IMPORT.search(code):
+        result.check(ref, "SAP runtime committed", False,
+                     "uses sap_rt.* without `import bw_sap_runtime as sap_rt`")
+        return
+    runtime = root / _RUNTIME_FILE
+    if not runtime.exists():
+        result.check(ref, "SAP runtime committed", False, f"imports bw_sap_runtime but {_RUNTIME_FILE} is missing")
+        return
+    try:
+        exported = _runtime_exports(runtime)
+    except SyntaxError as exc:
+        result.check(ref, "SAP runtime committed", False, f"{_RUNTIME_FILE} does not parse: {exc.msg}")
+        return
+    unknown = sorted({f for f in _RUNTIME_USE.findall(code) if f not in exported})
+    result.check(
+        ref, "SAP runtime committed", not unknown,
+        "calls functions the runtime does not export: " + ", ".join(unknown),
+    )
+
+
+def check_entrypoint(code: str, language: str, result: Result, ref: str) -> None:
+    """A hop the sandbox can call. SQL is a statement; Python must expose transform."""
+    lang = (language or "").lower()
+    if "pyspark" in lang or "python" in lang or "snowpark" in lang:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return
+        names = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        result.check(
+            ref, "transform is callable", "transform" in names,
+            "no def transform(...) for the sandbox to run",
+        )
+        return
+    starts = bool(re.search(r"\b(select|insert|create|with|merge)\b", code, re.I))
+    result.check(ref, "transform is callable", starts, "no SQL statement for the sandbox")
+
+
+def check_fixtures(item: dict, result: Result, ref: str) -> None:
+    """Unit tests on the runner use the committed fixture, never the warehouse."""
+    fx = item.get("fixture") or {}
+    rows = fx.get("rows") if isinstance(fx, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    count = fx.get("count") if isinstance(fx, dict) else 0
+    n = count if isinstance(count, int) and count > 0 else len(rows)
+    if n <= 0:
+        print(f"  {SKIP} sandbox fixtures shipped — none on this hop yet")
+        return
+    keys = [c["name"] for c in (item.get("sourceSchema") or []) if c.get("isKey")]
+    if keys and rows and isinstance(rows[0], dict):
+        missing = [k for k in keys if k not in rows[0] and k.upper() not in {x.upper() for x in rows[0]}]
+        result.check(
+            ref, "sandbox fixtures shipped", not missing,
+            f"fixture rows missing key(s): {', '.join(missing[:6])}",
+        )
+        return
+    result.check(ref, "sandbox fixtures shipped", True)
+
+
 def _mentions(code: str, name: str) -> bool:
     if not name:
         return False
     return re.search(rf'\b{re.escape(name)}\b', code, re.IGNORECASE) is not None
+
+
+def check_isolation(root: Path, items: list, result: Result) -> None:
+    """CI is a sandbox. Generated SQL must not wipe a warehouse."""
+    hits: list[str] = []
+    for item in items:
+        path = root / item.get("path", "")
+        if not path.is_file():
+            continue
+        lowered = path.read_text(encoding="utf-8", errors="replace").lower()
+        found = [n for n in _PROD_WRITE if n in lowered]
+        if found:
+            hits.append(f"{item.get('ref')}: {found[0]}")
+    result.check(
+        "sandbox", "generated SQL stays off production", not hits,
+        "; ".join(hits[:4]),
+    )
+
+
+def check_no_secrets(root: Path, items: list, result: Result) -> None:
+    """A runner log is not a vault."""
+    hits: list[str] = []
+    for item in items:
+        path = root / item.get("path", "")
+        if not path.is_file():
+            continue
+        lowered = path.read_text(encoding="utf-8", errors="replace").lower()
+        found = [n for n in _SECRET_NEEDLES if n in lowered]
+        if found:
+            hits.append(f"{item.get('ref')}: {found[0]}")
+    result.check(
+        "sandbox", "no secrets in the commit", not hits,
+        "; ".join(hits[:4]),
+    )
 
 
 # --------------------------------------------------------------- objects --
@@ -360,6 +581,12 @@ def verify(manifest_path: Path) -> int:
     print(f"wave: {manifest.get('name') or manifest.get('waveId')}  "
           f"({len(items)} item(s), platform {manifest.get('platform', '?')})\n")
 
+    testable = [i for i in items if i.get("testable")]
+    if testable and not any(i.get("kind") == "object" for i in testable):
+        print(f"{SKIP} no objects — DDL checks not run")
+    if testable and not any(i.get("kind") != "object" for i in testable):
+        print(f"{SKIP} no transformations — hop checks not run")
+
     result = Result()
     for item in items:
         ref = item.get("ref", "?")
@@ -379,6 +606,9 @@ def verify(manifest_path: Path) -> int:
 
         # Syntax applies to every artifact, whatever it is.
         check_parses(code, item.get("language", ""), result, ref)
+        if item.get("kind") != "object":
+            check_entrypoint(code, item.get("language", ""), result, ref)
+            check_fixtures(item, result, ref)
 
         # After that the two kinds diverge completely. An object is DDL: there
         # is no transformation to exercise, so the source/target checks do not
@@ -391,19 +621,25 @@ def verify(manifest_path: Path) -> int:
                 check_object_ddl(code, plan, result, ref)
         else:
             check_no_fallback_banner(code, result, ref)
+            check_no_placeholder_logic(code, result, ref)
+            check_no_unimplemented_paths(code, item.get("language", ""), result, ref)
+            check_runtime(code, root, result, ref, item.get("language", ""))
             check_no_nondeterminism(code, result, ref)
+            check_cardinality(code, result, ref)
             check_target_columns(code, item.get("targetSchema", []), result, ref)
             check_routines_translated(code, item.get("routineFields", {}), result, ref)
             check_no_invented_columns(code, item.get("sourceSchema", []),
                                       item.get("targetSchema", []), result, ref)
         print()
 
-    # Snapshotted *before* the graph runs. The "nothing was testable" guard
-    # below asks whether any check ran against generated code, and a passing
-    # graph is not that — letting it count would silence the guard on exactly
-    # the waves it exists for, where no schema resolved and every hop was
-    # skipped.
+    # Snapshotted *before* sandbox and the graph run. Those are wave-level
+    # probes, not a substitute for checking generated hops.
     hop_passes = result.passed
+
+    print("sandbox")
+    check_no_secrets(root, items, result)
+    check_isolation(root, items, result)
+    print()
 
     graph_status = check_topology(manifest_path, result)
     if graph_status == 2:

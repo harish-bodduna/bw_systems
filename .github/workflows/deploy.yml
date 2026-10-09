@@ -1,4 +1,4 @@
-# sap-bw-migrator-workflow: 4
+# sap-bw-migrator-workflow: 5
 # Committed into the GENERATED repository as .github/workflows/deploy.yml
 #
 # CD after green CI on a sha. Dispatch-only: merging to `dev` is not a
@@ -22,6 +22,8 @@
 # from the manifest. Only the host and token live here.
 
 name: Deploy
+# The tool finds this run by its name: environment and the exact sha.
+run-name: Deploy ${{ inputs.environment }} ${{ inputs.sha }}
 
 on:
   workflow_dispatch:

@@ -17,7 +17,9 @@ actually runs.
 **Nothing is deleted.** A path that already exists is overwritten; a path that
 is in the workspace but not in this wave is left alone. Deleting "orphans" would
 mean this script decides that something a human put there by hand is garbage,
-and it has no way to know that.
+and it has no way to know that. The one exception replaces rather than
+deletes: a notebook this script itself wrote at the exact path of a Python
+file it is now writing (see `upload`).
 
 **Idempotent.** Re-running the same commit rewrites identical content, which is
 what makes a retry after a network failure safe.
@@ -82,21 +84,73 @@ def mkdirs(host: str, token: str, path: str) -> None:
     _call(host, token, "/api/2.0/workspace/mkdirs", {"path": path})
 
 
+def _is_python(language: str) -> bool:
+    lang = (language or "").lower()
+    return lang.endswith(".py") or "python" in lang or "pyspark" in lang or "snowpark" in lang
+
+
 def upload(host: str, token: str, path: str, content: str, language: str) -> None:
     """Import one file, overwriting whatever is there.
 
-    `format: SOURCE` with an explicit language rather than `AUTO`: AUTO guesses
-    from the extension and silently produces a notebook when it sees a magic
-    comment, which changes how the file is executed.
+    **Python goes up as a workspace file (`format: RAW`), not a notebook.**
+    `SOURCE` + `PYTHON` creates a notebook, and the job runs these through
+    `spark_python_task`, which executes a Python *file*; a notebook at that
+    path also cannot be imported, so `import bw_sap_runtime` beside it would
+    fail. RAW also never guesses — unlike `AUTO`, which turns a file into a
+    notebook when it sees a magic comment.
+
+    SQL stays a SQL notebook (`SOURCE` + `SQL`), which is how a SQL artifact is
+    run in a workspace.
     """
-    fmt_lang = "PYTHON" if language.lower().endswith((".py", "python")) else "SQL"
-    _call(host, token, "/api/2.0/workspace/import", {
+    body = {
         "path": path,
-        "format": "SOURCE",
-        "language": fmt_lang,
         "overwrite": True,
         "content": base64.b64encode(content.encode("utf-8")).decode(),
-    })
+    }
+    if _is_python(language):
+        body["format"] = "RAW"
+    else:
+        body["format"] = "SOURCE"
+        body["language"] = "SQL"
+    try:
+        _call(host, token, "/api/2.0/workspace/import", body)
+    except DeployError:
+        # Waves deployed before files replaced notebooks left a NOTEBOOK at
+        # this exact path, and a file cannot overwrite a notebook. Remove that
+        # one object — never a folder, never anything else — and import again.
+        if not _is_python(language) or not _is_notebook(host, token, path):
+            raise
+        _call(host, token, "/api/2.0/workspace/delete", {"path": path, "recursive": False})
+        _call(host, token, "/api/2.0/workspace/import", body)
+
+
+def _is_notebook(host: str, token: str, path: str) -> bool:
+    import urllib.parse
+
+    try:
+        status = _call(host, token,
+                       "/api/2.0/workspace/get-status?path=" + urllib.parse.quote(path),
+                       None, method="GET")
+    except DeployError:
+        return False
+    return status.get("object_type") == "NOTEBOOK"
+
+
+#: The SAP runtime generated PySpark imports (`import bw_sap_runtime as sap_rt`).
+#: Committed beside this script by the tool; uploaded beside the wave's scripts
+#: so the import resolves from the script's own folder on the cluster.
+RUNTIME_REPO_PATH = "ci/bw_sap_runtime.py"
+RUNTIME_MODULE = "bw_sap_runtime.py"
+
+
+def _needs_runtime(root: Path, items: list) -> bool:
+    for item in items:
+        artifact = root / item.get("path", "")
+        if artifact.suffix == ".py" and artifact.exists():
+            text = artifact.read_text(encoding="utf-8")
+            if "import bw_sap_runtime" in text or "from bw_sap_runtime" in text:
+                return True
+    return False
 
 
 def workspace_path(base: str, environment: str, wave: str, ref: str, ext: str) -> str:
@@ -135,6 +189,22 @@ def deploy(manifest_path: Path, environment: str, commit: str = "") -> int:
     mkdirs(host, token, f"{base}/{environment}")
 
     deployed, failed = [], []
+    if _needs_runtime(root, items):
+        runtime = root / RUNTIME_REPO_PATH
+        folder = str(Path(workspace_path(base, environment, wave, "x", ".py")).parent)
+        target = f"{folder}/{RUNTIME_MODULE}"
+        if not runtime.exists():
+            # Every script that imports it would fail on its first run.
+            print(f"refusing: artifacts import bw_sap_runtime but {RUNTIME_REPO_PATH} "
+                  "is not in the commit", file=sys.stderr)
+            return 1
+        try:
+            mkdirs(host, token, folder)
+            upload(host, token, target, runtime.read_text(encoding="utf-8"), ".py")
+            print(f"  ok   SAP runtime -> {target}")
+        except DeployError as exc:
+            print(f"  FAIL SAP runtime: {exc}", file=sys.stderr)
+            return 1
     for item in items:
         ref, rel = item.get("ref", "?"), item.get("path", "")
         artifact = root / rel

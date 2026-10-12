@@ -1,0 +1,100 @@
+# sap-bw-migrator-workflow: 2
+# Committed into the GENERATED repository as .github/workflows/release.yml
+#
+# Rolls one RELEASE out to an environment, layer by layer (sources first,
+# reporting last). Dispatch-only, and only by the tool: it fires this against
+# the release branch it wrote (release/<name>), whose single extra commit on
+# top of dev is the release manifest — so what ships is exactly that dev
+# commit plus the list of what the release carries.
+#
+# Two gates, as with Deploy:
+#   the tool decided  "this release passed Test" (in its database, before dispatch)
+#   the Environment reviewer decides  "ship it to this warehouse, now?"
+#
+# SECRETS REQUIRED: DATABRICKS_HOST, DATABRICKS_TOKEN (as for deploy.yml).
+
+name: Release
+# The tool finds this run by its name: environment and the rollout id.
+run-name: Release ${{ inputs.environment }} ${{ inputs.rollout }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: 'Release manifest, e.g. releases/r-2026.10.3.json'
+        required: true
+      environment:
+        description: 'Target environment'
+        required: true
+        default: test
+        type: choice
+        options: [test, prod]
+      from_layer:
+        description: 'First layer to deploy (a retry starts at the layer that failed)'
+        required: false
+        default: '0'
+      rollout:
+        description: 'The rollout id in the tool'
+        required: true
+      loads:
+        description: 'Objects whose landed data this rollout loads (comma-separated)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    # THIS is what pauses the pipeline: required reviewers on the environment.
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check the workspace is reachable before changing anything
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+            echo "::error title=Missing secrets::Set DATABRICKS_HOST and DATABRICKS_TOKEN"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            "$DATABRICKS_HOST/api/2.0/clusters/spark-versions")
+          if [ "$code" != "200" ]; then
+            echo "::error title=Databricks unreachable::HTTP $code from $DATABRICKS_HOST"
+            exit 1
+          fi
+
+      - name: Roll out layer by layer
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          # Optional: run loads on an existing cluster instead of a one-off one.
+          DATABRICKS_CLUSTER_ID: ${{ vars.DATABRICKS_CLUSTER_ID }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python ci/deploy_release.py \
+            --manifest "${{ inputs.manifest }}" \
+            --environment "${{ inputs.environment }}" \
+            --from-layer "${{ inputs.from_layer }}" \
+            --loads "${{ inputs.loads }}"
+
+      - name: Record what was released
+        if: always()
+        run: |
+          echo "### Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Manifest: \`${{ inputs.manifest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: \`${{ inputs.environment }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- From layer: \`${{ inputs.from_layer }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Released by: @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
